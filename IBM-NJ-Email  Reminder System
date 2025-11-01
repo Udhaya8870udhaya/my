@@ -1,0 +1,136 @@
+/**
+ * IBM-NJ Email Reminder System (Single File)
+ * ------------------------------------------
+ * Node.js + Express + MongoDB + Nodemailer + Node-Cron
+ * Features:
+ *  - Create reminder (title, message, email, schedule time)
+ *  - Stores in MongoDB
+ *  - Cron job checks every minute and sends email when due
+ */
+
+require("dotenv").config();
+const express = require("express");
+const mongoose = require("mongoose");
+const bodyParser = require("body-parser");
+const nodemailer = require("nodemailer");
+const cron = require("node-cron");
+
+// ====================== CONFIG ======================
+const PORT = process.env.PORT || 3000;
+const MONGO_URI = process.env.MONGO_URI || "mongodb://localhost:27017/reminderdb";
+const SMTP_HOST = process.env.SMTP_HOST || "smtp.gmail.com";
+const SMTP_PORT = process.env.SMTP_PORT || 587;
+const SMTP_USER = process.env.SMTP_USER || "youremail@gmail.com";
+const SMTP_PASS = process.env.SMTP_PASS || "yourpassword";
+const FROM_EMAIL = process.env.FROM_EMAIL || SMTP_USER;
+const CRON_SCHEDULE = process.env.CRON_SCHEDULE || "*/1 * * * *"; // every 1 minute
+
+// ====================== SETUP ======================
+const app = express();
+app.use(bodyParser.json());
+
+// MongoDB connection
+mongoose.connect(MONGO_URI, { useNewUrlParser: true, useUnifiedTopology: true })
+  .then(() => console.log("✅ MongoDB Connected"))
+  .catch(err => console.error("MongoDB Error:", err));
+
+// ====================== MODEL ======================
+const reminderSchema = new mongoose.Schema({
+  title: String,
+  message: String,
+  toEmail: String,
+  scheduledAt: Date,
+  sent: { type: Boolean, default: false },
+  createdAt: { type: Date, default: Date.now },
+});
+const Reminder = mongoose.model("Reminder", reminderSchema);
+
+// ====================== MAILER ======================
+const transporter = nodemailer.createTransport({
+  host: SMTP_HOST,
+  port: SMTP_PORT,
+  secure: false,
+  auth: { user: SMTP_USER, pass: SMTP_PASS },
+});
+
+// ====================== ROUTES ======================
+
+// Home
+app.get("/", (req, res) => {
+  res.send("✅ IBM-NJ Email Reminder System Running");
+});
+
+// Create reminder
+app.post("/api/reminders", async (req, res) => {
+  try {
+    const { title, message, toEmail, scheduledAt } = req.body;
+    if (!title || !toEmail || !scheduledAt)
+      return res.status(400).json({ error: "title, toEmail, and scheduledAt required" });
+
+    const reminder = new Reminder({
+      title,
+      message,
+      toEmail,
+      scheduledAt: new Date(scheduledAt),
+    });
+    await reminder.save();
+    res.status(201).json({ success: true, reminder });
+  } catch (err) {
+    console.error("Create error:", err);
+    res.status(500).json({ error: "server error" });
+  }
+});
+
+// Get all reminders
+app.get("/api/reminders", async (req, res) => {
+  try {
+    const reminders = await Reminder.find().sort({ scheduledAt: 1 });
+    res.json(reminders);
+  } catch (err) {
+    res.status(500).json({ error: "server error" });
+  }
+});
+
+// Delete a reminder
+app.delete("/api/reminders/:id", async (req, res) => {
+  try {
+    await Reminder.findByIdAndDelete(req.params.id);
+    res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ error: "server error" });
+  }
+});
+
+// ====================== CRON JOB ======================
+cron.schedule(CRON_SCHEDULE, async () => {
+  const now = new Date();
+  try {
+    const dueReminders = await Reminder.find({ scheduledAt: { $lte: now }, sent: false });
+    if (dueReminders.length) console.log(`⏰ Found ${dueReminders.length} due reminders`);
+
+    for (const r of dueReminders) {
+      try {
+        await transporter.sendMail({
+          from: FROM_EMAIL,
+          to: r.toEmail,
+          subject: `Reminder: ${r.title}`,
+          text: `${r.message}\n\nScheduled for: ${r.scheduledAt}`,
+          html: `<h3>${r.title}</h3><p>${r.message}</p><small>Scheduled at: ${r.scheduledAt}</small>`,
+        });
+        r.sent = true;
+        await r.save();
+        console.log(`📧 Sent to ${r.toEmail}`);
+      } catch (mailErr) {
+        console.error(`❌ Failed to send to ${r.toEmail}:`, mailErr.message);
+      }
+    }
+  } catch (err) {
+    console.error("Cron job error:", err);
+  }
+});
+
+// ====================== START SERVER ======================
+app.listen(PORT, () => {
+  console.log(`🚀 Server running on http://localhost:${PORT}`);
+  console.log(`🕒 Cron job schedule: ${CRON_SCHEDULE}`);
+});
